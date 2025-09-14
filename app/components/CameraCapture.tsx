@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
 
 export default function CameraCapture() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -13,11 +14,28 @@ export default function CameraCapture() {
   const [error, setError] = useState<string | null>(null);
   const [frozenFrame, setFrozenFrame] = useState<string | null>(null);
   const [showToast, setShowToast] = useState(false); // ✅ toast state
+  const [uploadedImage, setUploadedImage] = useState<string | null>(null);
 
   const isSecure = typeof window !== 'undefined' ? window.isSecureContext : true;
   const supportsGetUserMedia =
     typeof navigator !== 'undefined' &&
     !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const dataUrl = e.target?.result as string;
+        setUploadedImage(dataUrl);
+        setFrozenFrame(dataUrl);
+        stopCamera();
+        setShowToast(true);
+        setTimeout(() => setShowToast(false), 2000);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
 
   async function startCamera() {
     if (!supportsGetUserMedia) {
@@ -65,7 +83,7 @@ export default function CameraCapture() {
   function capture() {
     if (!videoRef.current || !canvasRef.current) return;
 
-    const track = stream?.getVideoTracks?.[0];
+    const track = stream?.getVideoTracks()?.[0];
     const settings = track ? track.getSettings() : {};
     const w = (settings.width as number) || videoRef.current.videoWidth || 1280;
     const h = (settings.height as number) || videoRef.current.videoHeight || 720;
@@ -86,43 +104,54 @@ export default function CameraCapture() {
     if (!ctx) return;
     ctx.drawImage(videoRef.current, 0, 0, outW, outH);
 
-    canvas.toBlob((b) => {
-      if (b) {
-        setBlob(b);
-        const url = URL.createObjectURL(b);
-        setFrozenFrame(url);
-        stopCamera();
+    // Get base64 data URL instead of blob URL
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+    setFrozenFrame(dataUrl);
+    stopCamera();
 
-        // ✅ Show toast
-        setShowToast(true);
-        setTimeout(() => setShowToast(false), 2000);
-      }
-    }, 'image/jpeg', 0.92);
+    // ✅ Show toast
+    setShowToast(true);
+    setTimeout(() => setShowToast(false), 2000);
   }
 
-  async function upload() {
-    if (!blob) return;
-    const form = new FormData();
-    form.append('photo', blob, `capture-${Date.now()}.jpg`);
-    const res = await fetch('/api/upload', { method: 'POST', body: form });
-    if (!res.ok) {
-      alert('Upload failed');
-      return;
+  function handleRetry() {
+    setBlob(null);
+    setFrozenFrame(null);
+    startCamera();
+  }
+
+  const router = useRouter();
+
+  function handleNext() {
+    if (frozenFrame) {
+      try {
+        // Store the image data in sessionStorage instead of URL
+        sessionStorage.setItem('capturedPhoto', frozenFrame);
+        // Navigate to the preview page
+        router.push('/preview');
+      } catch (error) {
+        console.error('Error storing photo in sessionStorage:', error);
+        setError('Failed to save the photo. Please try again.');
+      }
     }
-    const data = await res.json().catch(() => ({}));
-    alert('Uploaded ✔' + (data.url ? `\nURL: ${data.url}` : ''));
   }
 
   function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (file) {
       setBlob(file);
-      const url = URL.createObjectURL(file);
-      setFrozenFrame(url);
-
-      // ✅ Toast on file capture too
-      setShowToast(true);
-      setTimeout(() => setShowToast(false), 2000);
+      
+      // Convert File to data URL
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        setFrozenFrame(dataUrl);
+        
+        // ✅ Toast on file capture too
+        setShowToast(true);
+        setTimeout(() => setShowToast(false), 2000);
+      };
+      reader.readAsDataURL(file);
     }
   }
 
@@ -206,14 +235,17 @@ export default function CameraCapture() {
         </div>
       )}
 
-      {/* Center overlay: Start camera (only if no stream and no frozen frame) */}
+      {/* Center overlay: Start camera or upload (only if no stream and no frozen frame) */}
       {!stream && !frozenFrame && (
         <div
           style={{
             position: 'absolute',
             inset: 0,
-            display: 'grid',
-            placeItems: 'center',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '16px',
             background:
               'linear-gradient(180deg, rgba(0,0,0,0.25) 0%, rgba(0,0,0,0.45) 50%, rgba(0,0,0,0.25) 100%)',
             padding: 16,
@@ -225,7 +257,13 @@ export default function CameraCapture() {
             aria-busy={busy}
             style={centerBtnStyle(busy)}
           >
-            {busy ? 'Starting…' : 'Start camera'}
+            {busy ? 'Starting…' : 'Take a Photo'}
+          </button>
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            style={centerBtnStyle(false, true)}
+          >
+            Upload an Image
           </button>
         </div>
       )}
@@ -246,33 +284,42 @@ export default function CameraCapture() {
             'linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,0.35) 35%, rgba(0,0,0,0.65) 100%)',
         }}
       >
-        <button
-          onClick={capture}
-          disabled={!stream || busy}
-          style={pillBtnStyle(true, !stream || busy)}
-        >
-          Capture
-        </button>
-
-        <button
-          onClick={upload}
-          disabled={!blob}
-          style={pillBtnStyle(false, !blob)}
-          title={blob ? 'Upload last photo' : 'Take a photo first'}
-        >
-          Upload
-        </button>
+        {!frozenFrame ? (
+          <button
+            onClick={capture}
+            disabled={!stream || busy}
+            style={pillBtnStyle(true, !stream || busy)}
+          >
+            Capture
+          </button>
+        ) : (
+          <>
+            <button
+              onClick={handleRetry}
+              style={pillBtnStyle(false, false)}
+            >
+              Retry
+            </button>
+            <button
+              onClick={handleNext}
+              disabled={!frozenFrame}
+              style={pillBtnStyle(true, !frozenFrame)}
+            >
+              Next
+            </button>
+          </>
+        )}
       </div>
     </div>
   );
 }
 
-function centerBtnStyle(disabled: boolean): React.CSSProperties {
+function centerBtnStyle(disabled: boolean, secondary = false): React.CSSProperties {
   return {
     padding: '14px 22px',
     borderRadius: 999,
     border: '1px solid rgba(255,255,255,0.28)',
-    background: 'white',
+    background: secondary ? 'rgba(255,255,255,0.9)' : 'white',
     color: 'black',
     fontSize: 16,
     fontWeight: 700,
